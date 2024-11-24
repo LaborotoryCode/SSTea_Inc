@@ -9,17 +9,22 @@ from langchain_community.document_loaders import TextLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.chains.retrieval_qa.base import RetrievalQA
-from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import FAISS
+
+#History of convo
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import START, MessagesState, StateGraph
+from langchain_core.messages import HumanMessage, SystemMessage
 
 import pdfplumber
 from langchain.document_loaders import TextLoader
 from langchain.schema import Document
 
-model_id = "mistralai/Ministral-8B-Instruct-2410"
+model_id = "meta-llama/Llama-3.2-3B-Instruct"
 
 import os
 
-file_path = r"C:\Users\ayaan\Desktop\.venv\Radioactivity Notes.pdf"
+file_path = r"C:\Users\ayaan\Desktop\.venv\1706.03762.pdf"
 if not os.path.exists(file_path):
     print(f"File does not exist: {file_path}")
 else:
@@ -38,7 +43,7 @@ bnb_config = transformers.BitsAndBytesConfig(
 time_start = time()
 model_config = transformers.AutoConfig.from_pretrained(
     model_id,
-    max_new_tokens = 1024
+    max_new_tokens = 2024
 )  
 
 model = transformers.AutoModelForCausalLM.from_pretrained(
@@ -58,7 +63,8 @@ query_pipeline = transformers.pipeline(
     model = model,
     tokenizer=tokenizer,
     torch_dtype=torch.float16,
-    device_map="auto"
+    device_map="auto",
+    max_new_tokens = 1024
 )
 time_end = time()
 
@@ -90,7 +96,7 @@ print(llm(prompt=""))
 
 #Load documents
 
-document_path = r"C:\Users\ayaan\Desktop\.venv\Radioactivity Notes.pdf"
+document_path = file_path
 document_text = ""
 
 with pdfplumber.open(document_path) as pdf:
@@ -109,17 +115,16 @@ model_kwargs = {"device" : "cuda"}
 
 embeddings = HuggingFaceEmbeddings(model_name=model_name, model_kwargs=model_kwargs)
 
-vectordb = Chroma.from_documents(documents=all_splits,
-                                 embedding=embeddings,
-                                 persist_directory="chroma_db")
+faiss_vectordb = FAISS.from_documents(documents=all_splits,
+                                 embedding=embeddings)
 
-retriever = vectordb.as_retriever()
+retriever = faiss_vectordb.as_retriever()
 
 qa = RetrievalQA.from_chain_type(
     llm=llm,
     chain_type="stuff",
     retriever=retriever,
-    verbose=True
+    verbose=True,
 )
 
 #Test Retrieval
@@ -131,5 +136,43 @@ def test_rag(qa, query):
     print(f"Inference time: {round(time_end-time_start, 3)} sec.")
     print("\nResult: ", result)
 
-query = "GIVE ME A MAX OF 10 WORDS NO MORE."
+query = """Ask me a question from the document and provide the answer too"""
+
 print(test_rag(qa, query))
+
+"""
+#Keep conversational history
+query = input("Please enter a query for the documents: ")
+
+workflow = StateGraph(state_schema=MessagesState)
+
+def call_rag(state: MessagesState):
+    system_prompt = (
+        "You must answer all questions to the best of you ability based on the documents given."
+        "If you do not know the answer do not guess"
+        "Pretend that you are my professor"
+    )
+    messages = [SystemMessage(content=system_prompt)] + state["messages"]
+    print("Answering")
+    response = qa(messages)
+    answer = {"messages": response}
+    index = str(answer)
+    index = index.find("Helpful Answer: ")
+    print("index:", index)
+    return answer[index::]
+   
+
+workflow.add_node("model", call_rag)
+workflow.add_edge(START, "model")
+
+memory = MemorySaver()
+app = workflow.compile(checkpointer=memory)
+
+while True:
+    query = input("Please enter a query for the documents: ")
+
+    app.invoke(
+        {"messages": [HumanMessage(content=query)]},
+        config={"configurable": {"thread_id": "1"}}
+    )
+"""
